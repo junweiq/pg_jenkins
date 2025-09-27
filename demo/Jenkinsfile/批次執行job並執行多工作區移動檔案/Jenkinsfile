@@ -1,0 +1,91 @@
+import groovy.transform.Field
+
+/*
+  job 參數有
+  1. 字串參數 名稱=multiFilepath, 預設值=, 說明=檔案路徑(可用 , 配置多個)
+*/
+final @Field List<String> FILEPATH_LIST
+final @Field String NEWFILE_JOB_WS
+
+FILEPATH_LIST = (params.multiFilepath ?: '')
+	.split(/\s*,\s*/)
+	.findAll { it?.trim() }
+
+if (FILEPATH_LIST.isEmpty()) {
+	error "multiFilepath 為空，沒有可處理的路徑"
+}
+
+pipeline {
+	agent any
+
+	stages {
+		stage('批次創建檔案（並行）') {
+			steps {
+				script {
+					NEWFILE_JOB_WS = "test-${env.BUILD_NUMBER}"
+					currentBuild.displayName = "#${env.BUILD_NUMBER} - 測試job"
+					currentBuild.description = "multiFilepath=${params.multiFilepath}"
+
+					def branches = [:]
+					FILEPATH_LIST.eachWithIndex { path, idx ->
+						def wsName = "${NEWFILE_JOB_WS}-${idx+1}"
+						def branchName = "job-${idx+1}"
+						branches[branchName] = {
+							echo "Trigger ${branchName}: path='${path}', WS_NAME='${wsName}'"
+
+							/*
+								job 參數有
+								1. 字串參數 名稱=WS_NAME, 預設值=, 說明=工作區名稱
+								2. 字串參數 名稱=filepath, 預設值=, 說明=單筆檔案路徑
+							*/
+							build(
+								job: 'newfile',
+								parameters: [
+									string(name: 'WS_NAME', value: wsName),
+									string(name: 'filepath', value: path),
+								],
+								propagate: true,
+								quietPeriod: 0
+							)
+						}
+					}
+					parallel branches
+				}
+			}
+		}
+
+		stage('合併到父目錄並列出') {
+			steps {
+				script {
+					def baseJooDir = "/var/jenkins_home/workspace/newfile"
+
+					sh """
+					set -euo pipefail
+					mkdir -p "${baseJooDir}/${NEWFILE_JOB_WS}"
+          """
+
+					FILEPATH_LIST.eachWithIndex { _, idx ->
+						def wsName = "${NEWFILE_JOB_WS}-${idx+1}"
+						def src = "${baseJooDir}/${wsName}"
+						def dst = "${baseJooDir}/${NEWFILE_JOB_WS}"
+						sh """
+						set -euo pipefail
+						if [ -d "$src" ]; then
+							# 搬移 src 下所有項目（含隱藏檔），避免空展開與空目錄問題
+							find "$src" -mindepth 1 -maxdepth 1 -exec mv -f {} "$dst"/ \\;
+						else
+							echo "WARN: $src 不存在或無內容"
+						fi
+            """
+					}
+
+					// 最後列出父目錄內容到 log
+					sh """
+					set -euo pipefail
+					ls -la "${baseJooDir}/${NEWFILE_JOB_WS}"
+          """
+				}
+			}
+		}
+	}
+}
