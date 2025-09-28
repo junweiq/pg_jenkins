@@ -1,0 +1,96 @@
+	import groovy.transform.Field
+
+	/*
+		job 參數有
+		1. 字串參數 名稱=multiFilepath, 預設值=, 說明=檔案路徑(可用 , 配置多個)
+	*/
+	final @Field List<String> FILEPATH_LIST
+	@Field String NEWFILE_JOB_WS = "test-dist"
+
+	FILEPATH_LIST = (params.multiFilepath ?: '')
+		.split(/\s*,\s*/)
+		.findAll { it?.trim() }
+
+	if (FILEPATH_LIST.isEmpty()) {
+		error "multiFilepath 為空，沒有可處理的路徑"
+	}
+
+	pipeline {
+		agent any
+
+		stages {
+			stage('批次創建檔案（並行）') {
+				steps {
+					script {
+						currentBuild.displayName = "#${env.BUILD_NUMBER} - 測試job"
+						currentBuild.description = "multiFilepath=${params.multiFilepath}"
+
+						def branches = [:]
+						FILEPATH_LIST.eachWithIndex { path, idx ->
+							def wsName = "test-${env.BUILD_NUMBER}-${idx+1}"
+							def branchName = "job-${idx+1}"
+							branches[branchName] = {
+								echo "Trigger ${branchName}: path='${path}', WS_NAME='${wsName}'"
+
+								/*
+									job 參數有
+									1. 字串參數 名稱=WS_NAME, 預設值=, 說明=工作區名稱
+									2. 字串參數 名稱=filepath, 預設值=, 說明=單筆檔案路徑
+								*/
+								build(
+									job: 'newfile',
+									parameters: [
+										string(name: 'WS_NAME', value: wsName),
+										string(name: 'filepath', value: path),
+									],
+									propagate: true,
+									quietPeriod: 0
+								)
+							}
+						}
+						parallel branches
+					}
+				}
+			}
+
+			stage('合併到父目錄並列出') {
+				steps {
+					script {
+						def baseJooDir = "/var/jenkins_home/workspace/newfile"
+						def dst = "${baseJooDir}/${NEWFILE_JOB_WS}"
+
+						sh """
+						# 若目錄存在就清空其內容（含隱藏檔與子資料夾）；否則建立
+						if [ -d "${dst}" ]; then
+							find "${dst}" -mindepth 1 -exec rm -rf {} +
+						else
+							mkdir -p "${dst}"
+						fi
+						"""
+
+						FILEPATH_LIST.eachWithIndex { path, idx ->
+							def wsName = "test-${env.BUILD_NUMBER}-${idx+1}"
+							def src = "${baseJooDir}/${wsName}"
+							def srcRootDirnameList = path.split("/").toList()
+							def srcRootDirname = ""
+							if (srcRootDirnameList.size() > 1) {
+								srcRootDirname = srcRootDirnameList.get(0)
+								src += "/$srcRootDirname"
+							} else {
+								srcRootDirname = "_unnamed"
+								src += "/${srcRootDirnameList.get(0)}"
+							}
+							sh """
+							mv -- "$src" "$dst/${idx+1}-$srcRootDirname" # 直接改名搬移（遞迴）
+							"""
+						}
+
+						// 最後列出父目錄內容到 log
+						sh """
+						ls -la "${baseJooDir}/${NEWFILE_JOB_WS}"
+						"""
+					}
+				}
+			}
+		}
+	}
